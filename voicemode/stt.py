@@ -26,18 +26,53 @@ def default_threads() -> int:
     return max(1, min(4, n // 2 if n >= 8 else n))
 
 
-def voiced_seconds(audio: np.ndarray, sr: int = SR) -> float:
-    """Rough amount of speech: 30 ms frames clearly above the noise floor."""
-    if audio.size < sr // 10:
-        return 0.0
-    hop = int(sr * 0.03)
+FRAME = 0.03                                         # seconds per VAD frame
+
+
+def voiced_mask(audio: np.ndarray, sr: int = SR) -> np.ndarray:
+    """One bool per 30 ms frame: clearly above the noise floor."""
+    hop = int(sr * FRAME)
     n = audio.size // hop
+    if n == 0:
+        return np.zeros(0, bool)
     frames = audio[: n * hop].reshape(n, hop)
     rms = np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
     # noise floor from the quietest frames, capped: with non-stop speech there are no quiet frames
     floor = np.percentile(rms, 10)
     thresh = max(0.008, min(floor * 3.0, 0.03))
-    return float((rms > thresh).sum()) * 0.03
+    return rms > thresh
+
+
+def voiced_seconds(audio: np.ndarray, sr: int = SR) -> float:
+    """Rough amount of speech in `audio`."""
+    if audio.size < sr // 10:
+        return 0.0
+    return float(voiced_mask(audio, sr).sum()) * FRAME
+
+
+def trailing_silence(audio: np.ndarray, sr: int = SR) -> float:
+    """Seconds since the last voiced frame (0 while the user is still talking)."""
+    m = voiced_mask(audio, sr)
+    if not m.any():
+        return len(m) * FRAME
+    return float(len(m) - 1 - np.flatnonzero(m)[-1]) * FRAME
+
+
+def find_pause(audio: np.ndarray, earliest: float, latest: float, min_len: float = 0.25,
+               sr: int = SR) -> int | None:
+    """Sample index in the middle of the last pause (>= min_len s) between earliest..latest s."""
+    m = voiced_mask(audio, sr)
+    lo, hi = int(earliest / FRAME), min(len(m), int(latest / FRAME))
+    need = max(1, int(min_len / FRAME))
+    best, run = None, 0
+    for i in range(lo, hi):
+        if not m[i]:
+            run += 1
+            if run >= need:
+                best = i - run // 2
+        else:
+            run = 0
+    return None if best is None else int(best * FRAME * sr)
 
 
 class SpeechToText:

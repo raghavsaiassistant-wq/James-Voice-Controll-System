@@ -79,7 +79,7 @@ def setup_logging(debug: bool):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-def build(settings, dry_run=False, with_laya=True):
+def build(settings, dry_run=False, with_laya=True, level_fn=None):
     from .actions.browser import Browser
     from .actions.system import make_system
     from .brain import Brain
@@ -96,7 +96,7 @@ def build(settings, dry_run=False, with_laya=True):
         brain.load_async()
     browser = Browser(settings, system, brain)
     executor = Executor(settings, system, browser, brain)
-    overlay = Overlay() if settings.overlay else None
+    overlay = Overlay(level_fn=level_fn) if settings.overlay else None
     feedback = Feedback(overlay, beeps=settings.beeps)
     ulog = config.LOG_DIR / "utterances.jsonl" if settings.log_utterances else None
     controller = Controller(executor, brain, feedback, settings, ulog)
@@ -117,6 +117,7 @@ def text_mode(parts, worker):
         if not line:
             continue
         worker.call(ctl.begin)
+        parts["feedback"].transcript(line, final=True)
         worker.call(ctl.final, line)
 
 
@@ -158,6 +159,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-laya", action="store_true", help="rules only (less RAM, faster start)")
     ap.add_argument("--mic-test", action="store_true",
                     help="record a few seconds, show what was heard and how it parses (runs nothing)")
+    ap.add_argument("--overlay-demo", action="store_true",
+                    help="show the transcript bar with a scripted example (no mic, runs nothing)")
     ap.add_argument("--debug", action="store_true")
     a = ap.parse_args(argv)
     try:
@@ -179,9 +182,21 @@ def main(argv=None) -> int:
     log = logging.getLogger("voicemode")
     if a.mic_test:
         return mic_test(settings)
+    if a.overlay_demo:
+        from .overlay import run_demo
+        try:
+            run_demo(loop=True)
+        except KeyboardInterrupt:
+            pass
+        return 0
     if a.text:
         settings.overlay = False
-    parts = build(settings, dry_run=a.dry_run, with_laya=not a.no_laya)
+    recorder = None
+    if not a.text:
+        from .audio import Recorder
+        recorder = Recorder(settings.extra.get("mic_device"))
+    parts = build(settings, dry_run=a.dry_run, with_laya=not a.no_laya,
+                  level_fn=(lambda: recorder.level) if recorder else None)
     worker = Worker()
     stop = threading.Event()
 
@@ -192,7 +207,7 @@ def main(argv=None) -> int:
             worker.call(parts["browser"].shutdown)
         return 0
 
-    from .audio import Listener, Recorder
+    from .audio import Listener
     from .hotkey import PushToTalk
     from .setup_models import stt_ready
     from .stt import SpeechToText
@@ -202,13 +217,23 @@ def main(argv=None) -> int:
     print("Speech model load ho raha hai…", flush=True)
     stt = SpeechToText(settings.stt_model_dir, settings.stt_threads, settings.stt_quantize)
     ctl, fb = parts["controller"], parts["feedback"]
+    # The bar is updated straight from the listener thread, so words keep appearing even while
+    # the worker is busy with a slow action; commands go through the worker queue, in order.
+    def on_begin():
+        fb.status("listening")
+        worker.submit(ctl.begin)
+
+    def on_partial(text, pause):
+        fb.transcript(text, final=False)
+        worker.submit(ctl.partial, text, pause, tag="partial", drop="partial")
+
+    def on_final(text):
+        fb.transcript(text, final=True)
+        worker.submit(ctl.final, text, drop="partial")
+
     listener = Listener(
-        stt, Recorder(settings.extra.get("mic_device")), settings,
-        on_begin=lambda: worker.submit(ctl.begin),
-        on_partial=lambda t: worker.submit(ctl.partial, t, tag="partial", drop="partial"),
-        on_final=lambda t: worker.submit(ctl.final, t, drop="partial"),
-        on_error=lambda m: fb.action(m, ok=False),
-        beep=fb.beep,
+        stt, recorder, settings, on_begin=on_begin, on_partial=on_partial, on_final=on_final,
+        on_error=lambda m: fb.action(m, ok=False), beep=fb.beep, on_release=fb.released,
     )
     listener.start()
     hk = PushToTalk(settings.hotkey, listener.press, listener.release)

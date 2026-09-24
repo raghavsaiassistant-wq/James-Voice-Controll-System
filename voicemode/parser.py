@@ -30,6 +30,7 @@ class Command:
     bare: bool = False           # just a name ("youtube") with no verb: act only on final
     destructive: bool = False
     source: str = "rules"
+    context: bool = False        # said as a follow-up ("once you're there", "usme"): act on the last target
 
     def signature(self) -> tuple:
         return (self.intent, tuple(sorted((k, str(v)) for k, v in self.args.items())))
@@ -43,13 +44,15 @@ class Command:
 CLOSED = {
     "scroll", "back", "forward", "reload", "new_tab", "close_tab", "next_tab", "prev_tab",
     "goto_tab", "reopen_tab", "volume", "media", "brightness", "window", "keys", "screenshot",
-    "confirm", "cancel", "pick", "power", "open_settings", "open_folder", "open_browser",
-    "close_browser",
+    "power", "open_settings", "open_folder", "open_browser", "close_browser", "take_photo", "new_item",
 }
+# "ok" / "haan" / "two" run on a pause or on release: mid-sentence they are usually just talk.
 
 
 def safe_on_partial(cmd: Command) -> bool:
-    return cmd.intent in CLOSED or (cmd.verb_final and not cmd.bare)
+    if cmd.bare:
+        return False          # "youtube" / "nayi file" with no verb yet: more words may follow
+    return cmd.intent in CLOSED or cmd.verb_final
 
 
 # ---------------------------------------------------------------- lexicons
@@ -58,7 +61,28 @@ WAKE = words("james", "jarvis", "hey", "assistant")
 LEAD_FILLERS = words("please", "plz", "pls", "zara", "jara", "bhai", "yaar", "yar", "ok", "okay",
                      "so", "now", "abhi", "ab", "just", "um", "uh", "hmm", "achha", "acha")
 LEAD_PHRASES = phrases("can you", "could you", "would you", "will you", "i want to", "i want you to",
-                       "i would like to", "mujhe", "meko", "mere liye", "for me")
+                       "i would like to", "mujhe", "meko", "mere liye", "for me", "can you please",
+                       "could you please", "please can you", "i need you to", "i'd like you to",
+                       "let's", "lets", "let us", "go ahead and", "jaldi se", "can we", "you can",
+                       "i want", "we need to", "ok so", "alright so", "right so", "okay so")
+# Follow-ups that point at whatever was opened last: stripped, and the command is marked `context`.
+CONTEXT_PHRASES = phrases(
+    "once you are there", "once you're there", "once you re there", "when you are there",
+    "when you're there", "once there", "over there", "there", "once it opens", "once it's open",
+    "when it opens", "after it opens", "inside this new note", "inside the new note", "inside this note",
+    "inside the note", "inside this new file", "inside this file", "inside the file", "inside it",
+    "inside that", "in it", "in there", "in this", "in that", "in this new note", "in the new note",
+    "in this note", "on this page", "on that page", "on it",
+    "wahan pe", "wahan par", "wahan", "vahan pe", "vahan", "waha", "vaha", "waha pe", "vaha pe",
+    "usme", "us me", "usmein", "us mein", "isme", "ismein", "is mein", "uske andar", "iske andar",
+    "andar", "khulne ke baad", "khulte hi", "phir usme", "ab usme", "now", "ab", "and now", "then",
+    "and then", "after that", "next", "uske baad", "iske baad", "fir", "phir")
+# Small talk between commands ("great, great, okay"): dropped without an error.
+CHATTER = words("great", "nice", "cool", "awesome", "ok", "okay", "alright", "all", "right", "thanks",
+                "thank", "you", "move", "on", "lets", "let", "s", "us", "perfect", "good", "very",
+                "badhiya", "bahut", "accha", "achha", "acha", "shabash", "wow", "amazing", "so", "um",
+                "uh", "hmm", "yeah", "yes", "sure", "and", "then", "now", "ab", "chalo", "theek", "thik",
+                "hai", "done", "hello", "hi", "bye", "super", "excellent", "fine", "wonderful", "sahi")
 TAIL = words("karo", "kro", "kar", "kardo", "kariye", "kijiye", "kijie", "karein", "karen", "karna",
              "karde", "de", "do", "dijiye", "dena", "dijie", "lo", "le", "lijiye", "na", "please",
              "plz", "pls", "abhi", "jaldi", "zara", "bhai", "yaar", "yar", "ji", "now", "quickly",
@@ -94,6 +118,8 @@ CLICK_POST = phrases("pe click karo", "par click karo", "per click karo", "ko cl
                      "pe tap karo", "par tap karo", "tap karo", "dabao", "ko dabao", "daba do",
                      "press karo", "select karo", "select kar do", "chuno", "choose karo")
 SEARCH_PRE = phrases("search for", "search", "search about", "google", "look up", "lookup", "find",
+                     "google search", "google search for", "do a google search for", "google for",
+                     "do a search for", "search google for", "search on google for",
                      "find me", "search karo", "dhundo", "dhoondo", "dhoondho", "khojo")
 SEARCH_POST = phrases("search karo", "search kar do", "search kardo", "search kijiye", "search",
                       "dhundo", "dhoondo", "dhoondho", "dhund do", "dhoondh do", "khojo", "google karo",
@@ -181,6 +207,11 @@ def _lookup(toks: list[Token], table: dict):
 def spoken_url(toks: list[Token], text: str) -> str | None:
     """"example dot com", "example.com", "news dot ycombinator dot com" -> URL."""
     raw = [t.raw.lower() for t in toks]
+    # every word must be a domain label or a spoken "dot": "open up x dot com" is not "openupx.com"
+    dots = {"dot", "daat", "dat", "point"}
+    for i, w in enumerate(raw):
+        if (w in dots) == (i % 2 == 0) and "." not in w:
+            return None
     s = " ".join(raw)
     s = re.sub(r"\s*\b(dot|daat|dat|point)\b\s*", ".", s)
     s = s.replace(" ", "")
@@ -222,7 +253,43 @@ def resolve_target(toks: list[Token], text: str) -> dict | None:
         return {"kind": "url", "url": url}
     if key and key[-1] in (canon_phrase("settings") + canon_phrase("setting")):
         return {"kind": "settings", "key": "home", "target": "ms-settings:"}
+    near = _fuzzy_catalog(" ".join(t.c for t in trimmed))
+    if near is not None:
+        return near
     return {"kind": "thing", "name": span_text(text, trimmed)}
+
+
+def _fuzzy_catalog(q: str) -> dict | None:
+    """Recognizer slips: "art browser" -> arc browser, "note pad" -> notepad, "you tube" -> youtube."""
+    if len(q) < 4:
+        return None
+    from rapidfuzz import fuzz, process
+    names = _fuzzy_names()
+    hit = process.extractOne(q, list(names), scorer=fuzz.ratio, score_cutoff=86)
+    if hit is None:
+        hit = process.extractOne(q.replace(" ", ""), [n.replace(" ", "") for n in names], scorer=fuzz.ratio,
+                                 score_cutoff=90)
+        if hit is None:
+            return None
+        return dict(list(names.values())[hit[2]])
+    return dict(names[hit[0]])
+
+
+_FUZZY: dict | None = None
+
+
+def _fuzzy_names() -> dict:
+    global _FUZZY
+    if _FUZZY is None:
+        out = {}
+        for key in catalog.BROWSER_BY_NAME:
+            out[" ".join(key)] = {"kind": "browser"}
+        for key, site in catalog.SITE_BY_NAME.items():
+            out[" ".join(key)] = {"kind": "site", "site": site.key, "url": site.url}
+        for key, app in catalog.APP_BY_NAME.items():
+            out[" ".join(key)] = {"kind": "app", "app": app.key}
+        _FUZZY = {k: v for k, v in out.items() if len(k) >= 4}
+    return _FUZZY
 
 
 def _open_command(res: dict, seg_text: str, verb_final: bool, bare: bool = False) -> Command:
@@ -590,13 +657,16 @@ def p_type(toks, text):
     n = _starts(toks, TYPE_PRE)
     field_toks: list[Token] = []
     app_key = None
+    new_kind = None
     if n:
         body = toks[n:]
         # "... in the search box" / "... into the name field"
         for i in range(len(body) - 1, 0, -1):
             if body[i].c in words("in", "into", "inside", "on"):
                 tail = _object(body[i + 1:])
-                if any(t.c in FIELD_NOUNS for t in tail):
+                if _new_item_kind(body[i + 1:]):
+                    new_kind = _new_item_kind(body[i + 1:])
+                elif any(t.c in FIELD_NOUNS for t in tail):
                     field_toks = tail
                 elif _lookup(tail, catalog.APP_BY_NAME):
                     app_key = _lookup(tail, catalog.APP_BY_NAME).key
@@ -614,7 +684,9 @@ def p_type(toks, text):
         for i, t in enumerate(body[:-1]):
             if t.c in words("me", "mein", "main", "mai", "pe", "par", "in"):
                 head = _object(body[:i])
-                if any(x.c in FIELD_NOUNS for x in head):
+                if _new_item_kind(body[:i]):
+                    new_kind = _new_item_kind(body[:i])
+                elif any(x.c in FIELD_NOUNS for x in head):
                     field_toks = head
                 elif head and _lookup(head, catalog.APP_BY_NAME) and i <= 3:
                     app_key = _lookup(head, catalog.APP_BY_NAME).key
@@ -635,6 +707,8 @@ def p_type(toks, text):
         args["field"] = span_text(text, field_toks)
     if app_key:
         args["app"] = app_key
+    if new_kind:
+        args["new_item"] = new_kind
     return Command("type_text", args, text, verb_final=verb_final, free_text=True)
 
 
@@ -855,8 +929,107 @@ def p_bare(toks, text):
     return None
 
 
-PARSERS = [p_confirm, p_pick, p_power, p_volume, p_media, p_tabs, p_history, p_scroll, p_window,
-           p_keys, p_type, p_search, p_play, p_click, p_close, p_switch, p_open, p_bare]
+PHOTO_NOUN = words("photo", "photos", "picture", "pic", "pics", "selfie", "tasveer", "tasvir", "foto",
+                   "snap", "snapshot", "image")
+PHOTO_TAKE = words("take", "click", "capture", "snap", "shoot", "lo", "le", "lelo", "le lo", "lijiye",
+                   "khicho", "khincho", "kheecho", "khinch", "khich", "khichiye", "khinchiye", "kheench",
+                   "khinchlo", "khichlo", "nikalo", "karo", "kar", "cheese")
+PHOTO_VOCAB = PHOTO_NOUN | PHOTO_TAKE | ARTICLES | TAIL | words(
+    "of", "me", "meri", "mera", "my", "ek", "one", "a", "an", "the", "ki", "ke", "se", "with", "camera",
+    "webcam", "quick", "jaldi", "abhi", "now", "please", "say", "us", "hum", "hamari", "apni", "khud")
+
+
+def p_photo(toks, text):
+    """"take a picture of me", "meri photo lo", "selfie le lo" -> press the shutter in Camera."""
+    ws = {t.c for t in toks}
+    if not ws & PHOTO_NOUN and "chees" not in ws:
+        return None
+    if not ws & PHOTO_TAKE and "selfi" not in ws:
+        return None
+    if not _covered(toks, PHOTO_VOCAB):
+        return None
+    return Command("take_photo", {}, text)
+
+
+NEW_ADJ = words("new", "naya", "nayi", "naye", "nai", "nae", "blank", "khali", "fresh", "another", "empty")
+NEW_NOUNS = {**{w: "note" for w in words("note", "notes", "sticky note")},
+             **{w: "file" for w in words("file", "document", "doc", "text file", "sheet", "spreadsheet",
+                                         "workbook", "presentation", "slide", "email", "mail", "message",
+                                         "page", "draft")},
+             **{w: "folder" for w in words("folder", "directory")},
+             **{w: "window" for w in words("window")}}
+NEW_VERBS = words("create", "make", "add", "start", "open", "banao", "bana", "banaiye", "banaye", "banado",
+                  "kholo", "khol", "chalu", "shuru", "begin")
+
+
+def _new_item_kind(toks: list[Token]) -> str | None:
+    """"a new note" / "nayi file" / "ek naya document" -> "note" / "file"; else None."""
+    body = _strip(toks, ARTICLES | words("a", "an", "ek", "one"), TAIL)
+    if not body or not _has(body, NEW_ADJ):
+        return None
+    nouns = [t for t in body if t.c not in NEW_ADJ | words("a", "an", "ek", "one", "text")]
+    key = " ".join(t.c for t in nouns)
+    return NEW_NOUNS.get(key)
+
+
+def p_new(toks, text):
+    """"create a new note", "nayi file banao", "new folder" -> Ctrl+N (or the app's own shortcut)."""
+    body = [t for t in toks if t.c not in NEW_VERBS | TAIL]
+    kind = _new_item_kind(body)
+    if kind is None:
+        # "create a note" / "note banao": a create verb without "new"
+        if _has(toks, words("create", "make", "banao", "bana", "banaiye", "banado")):
+            rest = _strip(body, ARTICLES | words("a", "an", "ek", "one"), TAIL)
+            kind = NEW_NOUNS.get(" ".join(t.c for t in rest))
+    if kind is None:
+        return None
+    has_verb = _has(toks, NEW_VERBS)
+    return Command("new_item", {"what": kind}, text, verb_final=has_verb and toks[-1].c in NEW_VERBS | TAIL,
+                   bare=not has_verb)
+
+
+TITLE = words("title", "heading", "headline", "name", "naam", "subject")
+TITLE_SET_PRE = phrases("make the title say", "make the title", "set the title to", "set the title as",
+                        "change the title to", "put the title as", "make the heading say",
+                        "set the heading to", "title should say", "title should be", "the title is",
+                        "title it", "name it", "call it", "make the title be", "let the title be",
+                        "make the name", "title", "heading")
+TITLE_SET_POST = phrases("likho", "likh do", "rakho", "rakh do", "daalo", "dalo", "daal do", "karo",
+                         "kar do", "hona chahiye", "hai", "banao", "set karo")
+
+
+def p_title(toks, text):
+    """"make the title say hello" / "title hello rakho" / "title me hello likho" -> type "hello"."""
+    if not _has(toks, TITLE | words("call", "name")) or _has(toks, FIELD_NOUNS):
+        return None          # "name field me Raghav likho" is a form field, not a title
+    n = _starts(toks, TITLE_SET_PRE)
+    if n and n < len(toks) and not _ends(toks, TITLE_SET_POST):
+        body = toks[n:]
+        body = _strip(body, words("say", "to", "as", "be", "is", "of", "this", "it", "the", "note", "file"), [])
+        if body and not (toks[0].c in TITLE and body[0].c in words("me", "mein", "main", "mai")):
+            return Command("type_text", {"text": _payload(text, body), "title": True}, text, free_text=True)
+    if toks[0].c in TITLE:
+        m = _ends(toks, TITLE_SET_POST)
+        if m:
+            body = _strip(toks[1:-m], words("me", "mein", "main", "mai", "pe", "par", "ko", "ka", "ki"), [])
+            if body:
+                return Command("type_text", {"text": _payload(text, body), "title": True}, text,
+                               verb_final=True, free_text=True)
+    return None
+
+
+def _payload(text: str, body: list[Token]) -> str:
+    payload = span_text(text, body)
+    payload = re.sub(r"^[\"'“”]+|[\"'“”,]+$", "", payload).strip()
+    if payload.endswith(".") and not payload.endswith(".."):
+        payload = payload[:-1]
+    return payload
+
+
+PARSERS = [p_confirm, p_pick, p_power, p_photo, p_volume, p_media, p_new, p_tabs, p_history, p_scroll,
+           p_window, p_keys, p_title, p_type, p_search, p_play, p_click, p_close, p_switch, p_open, p_bare]
+TRAIL = words("please", "plz", "pls", "bhai", "yaar", "yar", "ji", "na", "jaldi", "abhi", "now", "quickly",
+              "thanks", "thank", "you", "zara", "sir", "okay", "ok", "right")
 
 
 def _clean_edges(toks: list[Token]) -> list[Token]:
@@ -870,32 +1043,63 @@ def _clean_edges(toks: list[Token]) -> list[Token]:
         if n and len(toks) > n:
             toks = toks[n:]; changed = True
             continue
-        if len(toks) > 1 and toks[-1].c in words("please", "plz", "pls", "bhai", "yaar", "yar", "ji",
-                                                  "na", "jaldi", "abhi", "now", "quickly", "thanks",
-                                                  "thank", "you", "zara", "sir"):
-            if toks[-1].c == "you" and len(toks) > 1 and toks[-2].c != "thank":
+        if len(toks) > 1 and toks[-1].c in TRAIL:
+            if toks[-1].c == "you" and toks[-2].c != canon_phrase("thank")[0]:
                 break
             toks = toks[:-1]; changed = True
     return toks
 
 
-def parse_segment(toks: list[Token], text: str) -> Command | None:
-    toks = _clean_edges(toks)
-    if not toks:
-        return None
-    seg_text = span_text(text, toks)
-    for p in PARSERS:
-        cmd = p(toks, text)
+def _variants(toks: list[Token]):
+    """The segment with leading follow-up phrases peeled off one by one, most-stripped first."""
+    out = [(toks, False)]
+    cur = toks
+    for _ in range(4):
+        n = _starts(cur, CONTEXT_PHRASES)
+        if not n or len(cur) <= n:
+            break
+        cur = _clean_edges(cur[n:])
+        out.append((cur, True))
+    return reversed(out)
+
+
+# English verbs can end a Hinglish command ("notepad open", "lofi search") but are just as often
+# the middle of an English sentence still being spoken ("can you open…"). As the last word they
+# don't prove the command is finished; a Hindi verb ("kholo", "karo") does.
+EN_TAIL_VERBS = words("open", "search", "play", "type", "close", "start", "launch", "click", "select",
+                      "press", "tap", "find", "google", "write", "show", "run", "exit", "quit")
+
+
+def parse_segment(toks: list[Token], text: str, memo: dict | None = None) -> Command | None:
+    key = (toks[0].start, toks[-1].end) if toks else None
+    if memo is not None and key in memo:
+        return memo[key]
+    cmd = None
+    for variant, ctx in _variants(_clean_edges(toks)):
+        if not variant:
+            continue
+        for p in PARSERS:
+            cmd = p(variant, text)
+            if cmd:
+                cmd.text = span_text(text, variant)
+                cmd.context = ctx
+                if cmd.verb_final and variant[-1].c in EN_TAIL_VERBS:
+                    cmd.verb_final = False
+                break
         if cmd:
-            cmd.text = seg_text
-            return cmd
-    return None
+            break
+    if memo is not None:
+        memo[key] = cmd
+    return cmd
 
 
 # ---------------------------------------------------------------- segmentation
 
 _EN_START = words("open", "search", "click", "type", "scroll", "go", "play", "close", "press", "launch",
-                  "start", "switch", "volume", "mute", "take", "tap", "select", "write", "find", "show")
+                  "start", "switch", "volume", "mute", "take", "tap", "select", "write", "find", "show",
+                  "create", "make")
+_HARD = re.compile(r"[.?!;]")
+_SOFT = re.compile(r"[,:]")
 
 
 def _conj_len(toks: list[Token], i: int) -> int:
@@ -906,22 +1110,26 @@ def _conj_len(toks: list[Token], i: int) -> int:
                 return 0
             return len(p)
     if toks[i].c in CONJ:
-        if toks[i].c == canon_phrase("tab")[0]:
-            return 0      # "tab" is also a browser tab
         return 1
     return 0
 
 
-def _split_verbs(toks: list[Token], text: str) -> list[tuple[list[Token], Command]] | None:
+def _split_verbs(toks: list[Token], text: str, memo: dict) -> list[tuple[list[Token], Command]] | None:
     """Split one conjunction-free run into consecutive commands, or None if it doesn't parse."""
-    whole = parse_segment(toks, text)
-    n = len(toks)
-    for i in range(1, n):
+    if not toks:
+        return None
+    key = ("split", toks[0].start, toks[-1].end)
+    if key in memo:
+        return memo[key]
+    whole = parse_segment(toks, text, memo)
+    result = [(toks, whole)] if whole else None
+    tail_result = None      # best effort: commands up front, an unreadable (often unfinished) tail
+    for i in range(1, len(toks)):
         left, right = toks[:i], toks[i:]
         boundary = left[-1].c in VERB_END or right[0].c in _EN_START
         if not boundary:
             continue
-        lc = parse_segment(left, text)
+        lc = parse_segment(left, text, memo)
         if not lc:
             continue
         if right[0].c in _EN_START and left[-1].c not in VERB_END and \
@@ -929,15 +1137,29 @@ def _split_verbs(toks: list[Token], text: str) -> list[tuple[list[Token], Comman
             continue            # "search for how to open a file" stays one search
         if whole and whole.intent == lc.intent:
             continue            # "neeche scroll karo" is one scroll, not two
-        rest = _split_verbs(right, text)
-        if rest:
+        if lc.bare and whole is not None and whole.intent != "open_thing":
+            continue            # "google search norbert wiener" is one search
+        rest = _split_verbs(right, text, memo)
+        if rest and _complete(rest):
             if whole and whole.intent != "open_thing" and len(rest) == 1 and rest[0][1].intent in (
                     "open_thing", "pick") and not left[-1].c in VERB_END:
                 continue
-            return [(left, lc)] + rest
-    if whole:
-        return [(toks, whole)]
-    return None
+            result = [(left, lc)] + rest
+            break
+        if tail_result is None and whole is None:
+            tail_result = [(left, lc)] + (rest or [(right, Command("unknown", {}, span_text(text, right)))])
+    if result is None:
+        result = tail_result
+    memo[key] = result
+    return result
+
+
+def _complete(split) -> bool:
+    return split is not None and all(c.intent != "unknown" for _, c in split)
+
+
+def _is_chatter(toks: list[Token]) -> bool:
+    return bool(toks) and all(t.c in CHATTER | CONJ | LEAD_FILLERS | TAIL | WAKE for t in toks)
 
 
 def parse(text: str) -> list[Command]:
@@ -945,46 +1167,92 @@ def parse(text: str) -> list[Command]:
     toks = tokenize(text)
     if not toks:
         return []
-    # split on conjunctions, then merge pieces that don't parse on their own
-    pieces: list[list[Token]] = []
+    memo: dict = {}
+    # 1. cut at conjunctions ("aur", "and then") and punctuation. Each piece remembers what
+    #    separated it from the previous one: "hard" = end of a sentence.
+    pieces: list[tuple[str, list[Token], list[Token]]] = []     # (kind, separator tokens, body)
     cur: list[Token] = []
+    sep_kind, sep_toks = "start", []
     i = 0
     while i < len(toks):
+        gap = text[toks[i - 1].end:toks[i].start] if i else ""
         k = _conj_len(toks, i)
-        if k and cur:
-            pieces.append(cur)
+        if cur and (k or _HARD.search(gap) or _SOFT.search(gap)):
+            pieces.append((sep_kind, sep_toks, cur))
             cur = []
-            pieces.append(toks[i:i + k])      # keep the conjunction as its own marker piece
-            i += k
-            continue
+            sep_kind = "hard" if _HARD.search(gap) else "soft"
+            sep_toks = toks[i:i + k] if k else []
+            if k:
+                i += k
+                continue
         cur.append(toks[i])
         i += 1
     if cur:
-        pieces.append(cur)
-    segs: list[list[Token]] = []
-    j = 0
-    while j < len(pieces):
-        p = pieces[j]
-        if j + 1 < len(pieces) and _conj_len(pieces[j + 1], 0) and j + 2 < len(pieces):
-            left_ok = _split_verbs(p, text) is not None
-            right_ok = _split_verbs(pieces[j + 2], text) is not None
-            if left_ok and right_ok:
-                segs.append(p)
-                j += 2
-                continue
-            # merge p + conj + next and re-examine
-            pieces[j + 2] = p + pieces[j + 1] + pieces[j + 2]
-            j += 2
+        pieces.append((sep_kind, sep_toks, cur))
+
+    # 2. a piece that is only a follow-up phrase ("once you are there,") belongs to the next one
+    joined = []
+    carry: list[Token] = []
+    for kind, sep, body in pieces:
+        if carry:
+            body = carry + sep + body
+            carry = []
+        core = _clean_edges(body)
+        if core and _starts(core, CONTEXT_PHRASES) == len(core):
+            carry = body
             continue
-        segs.append(p)
-        j += 1
+        joined.append((kind, sep, body))
+    if carry:
+        joined.append(("soft", [], carry))
+    pieces = joined
+
+    # 3. merge pieces that don't stand alone
+    def ok(b):
+        return _complete(_split_verbs(b, text, memo))
+
+    segs: list[list[Token]] = []
+    acc = pieces[0][2]
+    for kind, sep, body in pieces[1:]:
+        left_ok, right_ok = ok(acc), ok(body)
+        if left_ok and (right_ok or kind == "hard" or _is_chatter(body)):
+            split = True                # "... hello. Great great." -> the chatter stays out
+        elif not left_ok and right_ok:
+            # "mujhe lagta hai, open youtube" -> split; "tom and jerry search karo" and
+            # "thoda aur neeche" -> merge, because together they make one command
+            split = kind == "hard" or parse_segment(acc + sep + body, text, memo) is None
+        else:
+            split = kind == "hard" and _is_chatter(acc)
+        if split:
+            segs.append(acc)
+            acc = body
+        else:
+            acc = acc + sep + body
+    segs.append(acc)
+
     out: list[Command] = []
     for s in segs:
-        split = _split_verbs(s, text)
+        split = _split_verbs(s, text, memo)
         if split:
             out.extend(c for _, c in split)
-        elif all(t.c in CONJ | LEAD_FILLERS | TAIL | WAKE for t in s):
+        elif _is_chatter(s):
             continue                   # a dangling "aur" / "please" while the user is mid-sentence
         else:
-            out.append(Command("unknown", {}, span_text(text, s)))
+            junk, rest = _recover(s, text, memo)
+            if rest:
+                if len(junk) > 2 and not _is_chatter(junk):
+                    out.append(Command("unknown", {}, span_text(text, junk)))
+                out.extend(c for _, c in rest)
+            else:
+                out.append(Command("unknown", {}, span_text(text, s)))
     return out
+
+
+def _recover(toks: list[Token], text: str, memo: dict):
+    """A few misheard words before a real command ("what's take a picture of me",
+    "and I mean so this new know, let's make the title say hello"): skip them."""
+    for i in range(1, len(toks)):
+        if toks[i].c in _EN_START or toks[i - 1].c in VERB_END or toks[i].c in PHOTO_TAKE:
+            rest = _split_verbs(toks[i:], text, memo)
+            if rest and not (len(rest) == 1 and rest[0][1].intent in ("open_thing", "unknown")):
+                return toks[:i], rest
+    return toks, None

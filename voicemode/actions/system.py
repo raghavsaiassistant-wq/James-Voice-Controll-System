@@ -72,7 +72,9 @@ class DryRunSystem:
     def has_app(self, name): return False
     def close_app(self, key=None, name=None): return self._rec("close_app", key or name) and 1
     def switch_app(self, key=None, name=None): return self._rec("switch_app", key or name)
-    def wait_foreground(self, key=None, name=None, timeout=5.0): return True
+    def wait_foreground(self, key=None, name=None, timeout=5.0): return self._rec("wait_foreground", key or name)
+    def is_running(self, key=None, name=None): return False
+    resolved_key = None
     def shell_open(self, target): return self._rec("shell_open", target)
     def type_text(self, text): return self._rec("type_text", text)
     def press(self, combo): return self._rec("press", combo)
@@ -100,6 +102,7 @@ class WindowsSystem:
         self.start_apps: list[dict] = []
         self._apps_lock = threading.Lock()
         self._overlay_hwnds: set[int] = set()
+        self.resolved_key: str | None = None
         self.user32.GetForegroundWindow.restype = wt.HWND
         self.user32.GetWindowTextLengthW.argtypes = [wt.HWND]
         self.user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
@@ -259,24 +262,35 @@ class WindowsSystem:
     def _launch_start_app(self, app: dict):
         subprocess.Popen(["explorer.exe", "shell:AppsFolder\\" + app["AppID"]])
 
+    def is_running(self, key=None, name=None) -> bool:
+        return bool(self._windows_for(key=key, name=name))
+
     def open_app(self, key=None, name=None):
-        """Focus the app if it's already open, else launch it. Returns the display name or None."""
+        """Focus the app if it's already open, else launch it. Returns the display name or None.
+        `resolved_key` tells which catalog app was opened (differs when a fallback was used)."""
+        self.resolved_key = key
         if key:
             app = next(a for a in catalog.APPS if a.key == key)
             wins = self._windows_for(key=key)
             if wins:
                 self._focus(wins[0].hwnd)
                 return app.names[0]
-            try:
-                os.startfile(app.launch)
-                return app.names[0]
-            except OSError:
-                for n in app.names:              # not on PATH: look for it in the Start menu
-                    hit = self.find_start_app(n)
-                    if hit:
-                        self._launch_start_app(hit)
-                        return hit["Name"]
-                return None
+            if app.launch:
+                try:
+                    os.startfile(app.launch)
+                    return app.names[0]
+                except OSError:
+                    pass
+            for n in (app.start_names or []) + app.names:     # look for it in the Start menu
+                hit = self.find_start_app(n, cutoff=88)
+                if hit:
+                    self._launch_start_app(hit)
+                    return hit["Name"]
+            if app.fallback:
+                name = self.open_app(key=app.fallback)
+                self.resolved_key = app.fallback if name else None
+                return name
+            return None
         hit = self.find_start_app(name)
         if hit:
             wins = self._windows_for(name=hit["Name"])

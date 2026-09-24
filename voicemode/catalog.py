@@ -25,7 +25,9 @@ class App:
     names: list[str]
     launch: str                        # exe / URI given to ShellExecute
     exe: str | None = None             # process name, used to find/close its windows
-    extra: list[str] = field(default_factory=list)
+    extra: list[str] = field(default_factory=list)       # other process names of the same app
+    start_names: list[str] = field(default_factory=list)  # Start-menu names to try if launch fails
+    fallback: str | None = None        # app key to open instead when this one isn't installed
 
 
 SITES = [
@@ -74,7 +76,11 @@ APPS = [
     App("taskmgr", ["task manager", "taskmanager"], "taskmgr.exe", "taskmgr.exe"),
     App("control", ["control panel"], "control.exe"),
     App("snipping", ["snipping tool", "snip tool", "snipping"], "ms-screenclip:", "snippingtool.exe"),
-    App("camera", ["camera"], "microsoft.windows.camera:", "windowscamera.exe"),
+    App("camera", ["camera", "camera app", "photo booth", "photobooth", "webcam", "selfie camera",
+                   "windows camera"], "microsoft.windows.camera:", "windowscamera.exe"),
+    App("notes", ["notes", "notes app", "note app", "sticky notes", "sticky note", "stickynotes"],
+        "", "microsoft.notes.exe",
+        extra=["stickynotes.exe"], start_names=["Sticky Notes", "OneNote"], fallback="notepad"),
     App("photos", ["photos", "photo", "gallery"], "ms-photos:", "photos.exe"),
     App("store", ["microsoft store", "store", "app store"], "ms-windows-store:"),
     App("clock", ["clock", "alarm", "alarms", "timer", "stopwatch"], "ms-clock:"),
@@ -123,7 +129,8 @@ SETTINGS = {
 }
 
 BROWSER_NAMES = ["browser", "chrome", "google chrome", "edge", "microsoft edge", "chromium",
-                 "web browser", "internet"]
+                 "web browser", "internet", "arc", "arc browser", "brave", "brave browser", "opera",
+                 "the browser", "my browser", "internet browser"]
 
 
 def _index(entries):

@@ -12,11 +12,18 @@ from .parser import Command
 log = logging.getLogger("voicemode")
 
 NAMES = {s.key: s.names[0].title() for s in catalog.SITES}
-NAMES.update({"youtube": "YouTube", "github": "GitHub", "linkedin": "LinkedIn", "chatgpt": "ChatGPT",
+NAMES.update({"twitter": "X", "youtube": "YouTube", "github": "GitHub", "linkedin": "LinkedIn", "chatgpt": "ChatGPT",
               "whatsapp": "WhatsApp", "gmail": "Gmail", "duckduckgo": "DuckDuckGo"})
 APP_NAMES = {a.key: a.names[0].title() for a in catalog.APPS}
 APP_NAMES.update({"vscode": "VS Code", "cmd": "Command Prompt", "taskmgr": "Task Manager",
-                  "powershell": "PowerShell"})
+                  "powershell": "PowerShell", "notes": "Sticky Notes"})
+
+BROWSER_INTENTS = {"open_site", "open_browser", "search", "play", "click", "pick", "back", "forward", "reload",
+                   "new_tab", "close_tab", "next_tab", "prev_tab", "goto_tab", "reopen_tab"}
+# Commands that act on "whatever is in front": they go to the last opened app/tab when that
+# happened in the same breath, or when said as a follow-up ("usme", "once you're there").
+FOLLOW_UP = {"type_text", "keys", "new_item", "take_photo", "scroll"}
+NEW_LABEL = {"note": "Nayi note", "file": "Nayi file", "folder": "Naya folder", "window": "Nayi window"}
 
 
 class Executor:
@@ -25,25 +32,52 @@ class Executor:
         self.system = system
         self.browser = browser
         self.brain = brain
-        self._opened: tuple[str, float] | None = None     # (app key, when) of the last app we opened
+        self.utt = 0                  # utterance counter (one per key press)
+        self.ctx: dict | None = None  # last thing we opened: {"kind": "app"|"browser", "key", "name", "t", "utt"}
 
-    def _wait_for_opened_app(self):
-        """"notepad kholo aur hello likho": give the app time to come up before typing into it."""
-        if self._opened and time.time() - self._opened[1] < 10:
-            self.system.wait_foreground(key=self._opened[0], timeout=6)
-        self._opened = None
+    # ------------------------------------------------------------ context
+    def begin_utterance(self):
+        self.utt += 1
+
+    def _set_ctx(self, kind: str, key: str | None = None, name: str | None = None, fresh: bool = True):
+        self.ctx = {"kind": kind, "key": key, "name": name, "t": time.time() if fresh else 0.0, "utt": self.utt}
+
+    def _ctx_applies(self, cmd: Command) -> bool:
+        return self.ctx is not None and (cmd.context or self.ctx["utt"] == self.utt)
+
+    def _focus_ctx(self, cmd: Command) -> None:
+        if not self._ctx_applies(cmd):
+            return
+        if self.ctx["kind"] == "app":
+            self.system.wait_foreground(key=self.ctx["key"], name=self.ctx["name"], timeout=6)
+        elif self.ctx["kind"] == "browser" and self.browser.running:
+            self.browser.front()
+
+    def _pause(self, seconds: float):
+        if self.system.real and seconds > 0:
+            time.sleep(seconds)
 
     def execute(self, cmd: Command, confirmed: bool = False) -> Result:
         fn = getattr(self, "do_" + cmd.intent, None)
         if fn is None:
             return Result(False, f"Ye abhi support nahi hai: {cmd.intent}")
-        return fn(cmd, confirmed) if cmd.intent in ("click", "pick") else fn(cmd)
+        if cmd.intent in FOLLOW_UP and not cmd.args.get("app") and not cmd.args.get("field") \
+                and cmd.intent != "take_photo":
+            self._focus_ctx(cmd)
+        res = fn(cmd, confirmed) if cmd.intent in ("click", "pick") else fn(cmd)
+        if res.ok and cmd.intent in BROWSER_INTENTS and not (self.ctx and self.ctx.get("via_app")):
+            self._set_ctx("browser")
+        if self.ctx:
+            self.ctx.pop("via_app", None)
+        return res
 
     # ------------------------------------------------------------ browser
     def do_open_site(self, c: Command) -> Result:
         site = catalog.SITE_BY_KEY.get(c.args.get("site", ""))
         if site and site.app and self.system.has_app(site.app):
             self.system.open_app(name=site.app)
+            self._set_ctx("app", name=site.app)
+            self.ctx["via_app"] = True
             return Result(True, f"{site.app} app khol diya")
         title = self.browser.open(c.args["url"])
         return Result(True, f"{NAMES.get(site.key, title) if site else title} khol diya")
@@ -98,19 +132,18 @@ class Executor:
         if app:
             if not self.system.open_app(key=app) or not self.system.wait_foreground(key=app, timeout=6):
                 return Result(False, f"{APP_NAMES.get(app, app)} tak nahi pahunch paya")
+            self._set_ctx("app", key=app)
+            if c.args.get("new_item"):
+                self._new_item(c.args["new_item"])
             self.system.type_text(text)
             return Result(True, f"{APP_NAMES.get(app, app)} me likh diya: “{text}”")
+        if c.args.get("new_item"):
+            self._new_item(c.args["new_item"])
         if field and self.browser.running:
             el = self.browser.fill(field, text)
             if el is not None:
                 return Result(True, f"Likh diya: “{text}”")
-        if self.system.real:
-            self._wait_for_opened_app()
-            self.system.type_text(text)
-        elif self.browser.running:
-            self.browser.type_here(text)
-        else:
-            self.system.type_text(text)
+        self.system.type_text(text)
         return Result(True, f"Likh diya: “{text}”")
 
     def do_scroll(self, c: Command) -> Result:
@@ -160,10 +193,14 @@ class Executor:
     # ------------------------------------------------------------ apps & files
     def do_open_app(self, c: Command) -> Result:
         key = c.args["app"]
+        was_open = self.system.is_running(key=key)
         name = self.system.open_app(key=key)
         if not name:
             return Result(False, f"{APP_NAMES.get(key, key)} is computer pe nahi mila")
-        self._opened = (key, time.time())
+        used = getattr(self.system, "resolved_key", None) or key
+        self._set_ctx("app", key=used, fresh=not was_open)
+        if used != key:
+            return Result(True, f"{APP_NAMES.get(key, key)} nahi mila — {APP_NAMES.get(used, name)} khol diya")
         return Result(True, f"{APP_NAMES.get(key, name)} khol diya")
 
     def do_open_thing(self, c: Command) -> Result:
@@ -176,9 +213,9 @@ class Executor:
         app = self.system.find_start_app(name)
         if app:
             self.system.open_app(name=name)
+            self._set_ctx("app", name=app["Name"])
             return Result(True, f"{app['Name']} khol diya")
-        site = self.browser.search(name, None)
-        return Result(True, f"“{name}” app nahi mila — {NAMES.get(site, site)} pe search kiya")
+        return Result(False, f"“{name}” nahi mila — web pe dhundhna ho to “{name} search karo” bolo")
 
     def do_close_app(self, c: Command) -> Result:
         n = self.system.close_app(key=c.args.get("app"), name=c.args.get("name"))
@@ -190,14 +227,18 @@ class Executor:
         label = APP_NAMES.get(c.args.get("app"), c.args.get("name"))
         if not ok and c.args.get("app"):
             return self.do_open_app(Command("open_app", {"app": c.args["app"]}, c.text))
+        if ok:
+            self._set_ctx("app", key=c.args.get("app"), name=c.args.get("name"), fresh=False)
         return Result(bool(ok), f"{label} pe switch" if ok else f"{label} khula nahi mila")
 
     def do_open_folder(self, c):
         self.system.shell_open(c.args["target"])
+        self._set_ctx("app", key="explorer")
         return Result(True, f"{c.args['folder'].title()} folder khola")
 
     def do_open_settings(self, c):
         self.system.shell_open(c.args["target"])
+        self._set_ctx("app", name="Settings")
         return Result(True, "Settings khol di" if c.args["page"] == "home" else f"{c.args['page'].title()} settings")
 
     # ------------------------------------------------------------ system
@@ -233,8 +274,6 @@ class Executor:
     def do_keys(self, c):
         combo = c.args["combo"]
         if self.system.real or not self.browser.running:
-            if self.system.real:
-                self._wait_for_opened_app()
             self.system.press(combo)
         else:
             pw = {"ctrl": "Control", "shift": "Shift", "alt": "Alt", "win": "Meta", "enter": "Enter",
@@ -245,6 +284,39 @@ class Executor:
             self.browser.press("+".join(pw.get(k, k.upper() if k.startswith("f") and k[1:].isdigit() else k)
                                         for k in combo.split("+")))
         return Result(True, f"Key: {combo}")
+
+    # ------------------------------------------------------------ new things / camera
+    def _new_item(self, what: str) -> str:
+        """Ctrl+N in the app in front (Notepad: new tab, Sticky Notes: new note, Word: new doc);
+        in the browser a new tab; a folder in Explorer is Ctrl+Shift+N."""
+        in_browser = (self.ctx is not None and self.ctx["kind"] == "browser" and self.ctx["utt"] == self.utt) \
+            or (self.browser.is_foreground() and not (self.ctx and self.ctx["kind"] == "app"
+                                                      and self.ctx["utt"] == self.utt))
+        if in_browser and what != "folder":
+            self.browser.new_tab()
+            return "Naya tab"
+        self.system.press("ctrl+shift+n" if what == "folder" else "ctrl+n")
+        self._pause(0.6)
+        return NEW_LABEL.get(what, "Naya item")
+
+    def do_new_item(self, c):
+        return Result(True, self._new_item(c.args["what"]) + " bana di")
+
+    def do_take_photo(self, c):
+        """Camera app: open (or focus) it, give it time to start the webcam, press the shutter."""
+        warm = getattr(self.settings, "camera_warmup", 2.5)
+        if not (self.ctx and self.ctx["kind"] == "app" and self.ctx["key"] == "camera"):
+            was_open = self.system.is_running(key="camera")
+            if not was_open and not self.system.open_app(key="camera"):
+                return Result(False, "Camera app nahi mila")
+            if was_open:
+                self.system.switch_app(key="camera")
+            self._set_ctx("app", key="camera", fresh=not was_open)
+        if not self.system.wait_foreground(key="camera", timeout=8):
+            return Result(False, "Camera app saamne nahi aaya")
+        self._pause(warm - (time.time() - self.ctx["t"]))
+        self.system.press("space")                  # Windows Camera: Space / Enter = take photo
+        return Result(True, "Photo le li 📸 (Pictures › Camera Roll)")
 
     def do_screenshot(self, c):
         self.system.screenshot()

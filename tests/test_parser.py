@@ -179,6 +179,32 @@ CASES = [
     ("Chrome band karo", [("close_browser", {})]),
     ("sabse neeche jao", [("scroll", {"direction": "down", "amount": "end"})]),
     ("calculator open kar do please", [("open_app", {"app": "calculator"})]),
+    # --- follow-ups, new items, photos (the reel flow)
+    ("once you are there, can you create a new note", [("new_item", {"what": "note"})]),
+    ("nayi note banao", [("new_item", {"what": "note"})]),
+    ("ek nayi file banao", [("new_item", {"what": "file"})]),
+    ("new folder banao", [("new_item", {"what": "folder"})]),
+    ("inside this new note, let's make the title say hello", [("type_text", {"text": "hello"})]),
+    ("title hello likho", [("type_text", {"text": "hello"})]),
+    ("title me Shopping list likho", [("type_text", {"text": "Shopping list"})]),
+    ("nayi file me hello likho", [("type_text", {"text": "hello", "new_item": "file"})]),
+    ("write good morning in a new note", [("type_text", {"text": "good morning", "new_item": "note"})]),
+    ("usme hello likho", [("type_text", {"text": "hello"})]),
+    ("wahan pe lofi search karo", [("search", {"query": "lofi"})]),
+    ("ab neeche scroll karo", [("scroll", {"direction": "down"})]),
+    ("meri photo lo", [("take_photo", {})]),
+    ("let's take a picture of me", [("take_photo", {})]),
+    ("selfie le lo", [("take_photo", {})]),
+    ("photo khincho", [("take_photo", {})]),
+    ("photos kholo", [("open_app", {"app": "photos"})]),
+    ("open up the photo booth", [("open_app", {"app": "camera"})]),
+    ("camera kholo", [("open_app", {"app": "camera"})]),
+    ("open up the notes app for me", [("open_app", {"app": "notes"})]),
+    ("open up the arc browser", [("open_browser", {})]),
+    ("can you Google search Norbert Wiener?", [("search", {"query": "Norbert Wiener"})]),
+    ("next tab", [("next_tab", {})]),
+    ("Great great. Ok let's move on", []),
+    ("Cool awesome thank you.", []),
     # --- chains
     ("youtube kholo aur lofi search karo",
      [("open_site", {"site": "youtube"}), ("search", {"query": "lofi"})]),
@@ -198,6 +224,26 @@ CASES = [
      [("scroll", {"direction": "down"}), ("click", {"ordinal": 1})]),
     # --- not commands
     ("so anyway I think we should get lunch", [("unknown", {})]),
+    # --- the reel, one breath (English)
+    ("Alright, can you open up the notes app for me and once you are there, can you create a new note? "
+     "And inside this new note, let's make the title say hello. Great great. Ok let's move on and can you "
+     "open up the arc browser and once you are there, can you Google search Norbert Wiener? Now can you open "
+     "up x dot com? Nice nice. Ok. Now can you open up the photo booth? And let's take a picture of me. "
+     "Cool awesome thank you.",
+     [("open_app", {"app": "notes"}), ("new_item", {"what": "note"}), ("type_text", {"text": "hello"}),
+      ("open_browser", {}), ("search", {"query": "Norbert Wiener"}), ("open_site", {"url": "https://x.com"}),
+      ("confirm", {}), ("open_app", {"app": "camera"}), ("take_photo", {})]),
+    # --- the same flow in Hinglish, with and without punctuation
+    ("Notepad kholo nayi file me hello likho browser kholo Google pe Norbert Wiener search karo "
+     "x.com kholo Camera kholo meri photo lo",
+     [("open_app", {"app": "notepad"}), ("type_text", {"text": "hello", "new_item": "file"}),
+      ("open_browser", {}), ("search", {"query": "Norbert Wiener", "site": "google"}),
+      ("open_site", {"url": "https://x.com"}), ("open_app", {"app": "camera"}), ("take_photo", {})]),
+    ("Notepad kholo. Usme nayi file banao aur title hello likho. Ab browser kholo, wahan pe Norbert Wiener "
+     "search karo. Phir x.com kholo. Camera kholo aur meri photo lo.",
+     [("open_app", {"app": "notepad"}), ("new_item", {"what": "file"}), ("type_text", {"text": "hello"}),
+      ("open_browser", {}), ("search", {"query": "Norbert Wiener"}), ("open_site", {"url": "https://x.com"}),
+      ("open_app", {"app": "camera"}), ("take_photo", {})]),
     ("mummy khana bana rahi hai", [("unknown", {})]),
 ]
 
@@ -224,6 +270,14 @@ def test_partial_safety():
     assert safe_on_partial(parse("scroll down")[0])             # closed set
     assert not safe_on_partial(parse("search for alan")[0])     # free text: wait for final
     assert safe_on_partial(parse("alan turing search karo")[0])  # verb-final free text
+
+
+def test_follow_up_is_marked_context():
+    c = parse("usme hello likho")[0]
+    assert c.context
+    assert not parse("hello likho")[0].context
+    cmds = parse("notepad kholo aur usme hello likho")
+    assert [c.context for c in cmds] == [False, True]
 
 
 def test_destructive_power():

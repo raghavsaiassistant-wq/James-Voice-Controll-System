@@ -24,7 +24,7 @@ class Settings:
     stt_model_dir: str = str(MODELS_DIR / "stt")
     stt_threads: int = 0                 # 0 = auto (physical cores, max 4)
     stt_quantize: bool = False           # int8 linear layers: ~35% faster on CPU, drops words on long Hindi
-    partial_interval: float = 0.45       # seconds between live re-transcriptions while holding
+    partial_interval: float = 0.3        # seconds between live re-transcriptions while holding
     min_speech_seconds: float = 0.35
     # Laya (local decision model). Off -> rules only, less RAM.
     use_laya: bool = True
@@ -39,6 +39,9 @@ class Settings:
     beeps: bool = True
     # Act on partial transcripts (while the key is still held) when a command is unambiguous.
     act_while_speaking: bool = True
+    pause_act_seconds: float = 0.7       # a pause this long after a command = it's complete
+    pause_act_free_seconds: float = 1.2  # ... for search / typed text (a query may continue)
+    camera_warmup: float = 2.5           # seconds for the Camera app to start before a photo
     confirm_timeout: float = 20.0
     log_utterances: bool = True
     extra: dict = field(default_factory=dict)

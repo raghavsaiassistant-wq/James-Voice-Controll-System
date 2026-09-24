@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from .stt import SR, voiced_seconds
+from .stt import SR, find_pause, trailing_silence, voiced_seconds
 
 log = logging.getLogger("voicemode")
 
@@ -22,10 +22,13 @@ class Recorder:
         self._lock = threading.Lock()
         self._stream = None
         self._rate = SR
+        self.level = 0.0            # loudness of the latest block, 0..~1 (drives the waveform icon)
 
     def _cb(self, indata, frames, t, status):
+        block = indata[:, 0].copy()
+        self.level = float(np.sqrt((block ** 2).mean() + 1e-12))
         with self._lock:
-            self._chunks.append(indata[:, 0].copy())
+            self._chunks.append(block)
 
     def start(self):
         import sounddevice as sd
@@ -58,17 +61,38 @@ class Recorder:
                 self._stream.close()
             finally:
                 self._stream = None
+        self.level = 0.0
         return self.snapshot()
 
 
-class Listener:
-    """Key down -> record; while held, re-transcribe every ~0.45 s (partials); key up -> final."""
+def join_text(a: str, b: str) -> str:
+    a, b = a.strip(), b.strip()
+    return f"{a} {b}".strip()
 
-    def __init__(self, stt, recorder, settings, on_begin, on_partial, on_final, on_error=None, beep=None):
+
+class Listener:
+    """Key down -> record; while held, re-transcribe every ~0.4 s (partials); key up -> final.
+
+    Whisper sees at most 30 s at a time, and long clips decode slowly, so a hold is streamed in
+    pieces: once the not-yet-committed audio is longer than COMMIT_AFTER, it is cut at the last
+    pause, that part is transcribed once and frozen ("committed"), and only the rest is
+    re-transcribed on each tick. The user can talk for minutes in one hold.
+
+    Partials carry the length of the current silence, so the controller can act on a command
+    the moment the user pauses after it (endpointing), not only when the key is released.
+    """
+
+    COMMIT_AFTER = 5.0          # s of live audio before we look for a pause to commit at
+    HARD_COMMIT = 18.0          # no pause at all for this long: cut anyway
+    PAUSE_MARKS = (0.7, 1.2)    # emit a partial again when the silence crosses these
+
+    def __init__(self, stt, recorder, settings, on_begin, on_partial, on_final, on_error=None, beep=None,
+                 on_release=None):
         self.stt = stt
         self.rec = recorder
         self.settings = settings
         self.on_begin, self.on_partial, self.on_final = on_begin, on_partial, on_final
+        self.on_release = on_release or (lambda: None)
         self.on_error = on_error or (lambda msg: log.error(msg))
         self.beep = beep or (lambda kind: None)
         self.events: queue.Queue = queue.Queue()
@@ -93,6 +117,9 @@ class Listener:
                 log.exception("listening failed")
                 self.on_error(f"Mic/speech error: {e}")
 
+    def _emit(self, text: str, pause: float):
+        self.on_partial(text, pause)
+
     def _session(self):
         try:
             self.rec.start()
@@ -104,7 +131,8 @@ class Listener:
         self.on_begin()
         interval = self.settings.partial_interval
         min_speech = self.settings.min_speech_seconds
-        last_len, last_text = 0, ""
+        committed, offset = "", 0            # frozen text, and how many samples it covers
+        last_len, last_text, mark = 0, "", 0
         t0 = time.time()
         while True:
             try:
@@ -115,21 +143,43 @@ class Listener:
                 break
             if ev == "down":
                 continue                     # auto-repeat of the held key
-            if time.time() - t0 > 60:
+            if time.time() - t0 > 600:
                 break                        # safety: stuck key
             audio = self.rec.snapshot()
-            if audio.size - last_len < int(0.3 * SR) or voiced_seconds(audio) < min_speech:
+            live = audio[offset:]
+            if voiced_seconds(live) < min_speech:
                 continue
-            text = self.stt.transcribe(audio)
+            if live.size > self.COMMIT_AFTER * SR:
+                cut = find_pause(live, earliest=2.0, latest=live.size / SR - 1.0)
+                if cut is None and live.size > self.HARD_COMMIT * SR:
+                    cut = live.size - 2 * SR
+                if cut:
+                    committed = join_text(committed, self.stt.transcribe(live[:cut]))
+                    offset += cut
+                    live = audio[offset:]
+                    last_len = 0
+            silence = trailing_silence(live)
+            new_mark = sum(silence >= m for m in self.PAUSE_MARKS)
+            if audio.size - last_len < int(0.25 * SR):
+                if new_mark > mark and last_text:
+                    mark = new_mark          # only silence was added: same words, now a pause
+                    self._emit(last_text, silence)
+                continue
+            tail = self.stt.transcribe(live) if voiced_seconds(live) >= min_speech else ""
+            text = join_text(committed, tail)
             last_len = audio.size
-            if text and text != last_text:
-                last_text = text
-                self.on_partial(text)
+            if text and (text != last_text or new_mark != mark):
+                last_text, mark = text, new_mark
+                self._emit(text, silence)
         audio = self.rec.stop()
         self.beep("stop")
-        final = ""
-        if voiced_seconds(audio) >= min_speech:
-            final = last_text if audio.size - last_len < int(0.15 * SR) and last_text else self.stt.transcribe(audio)
+        self.on_release()
+        live = audio[offset:]
+        if audio.size - last_len < int(0.15 * SR) and last_text:
+            final = last_text
+        else:
+            tail = self.stt.transcribe(live) if voiced_seconds(live) >= min_speech else ""
+            final = join_text(committed, tail)
         self.on_final(final)
 
     def _drain_until_up(self):

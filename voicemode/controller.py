@@ -32,6 +32,7 @@ class NullFeedback:
     def status(self, state: str, text: str = "") -> None: ...
     def transcript(self, text: str, final: bool) -> None: ...
     def action(self, message: str, ok: bool = True) -> None: ...
+    def finished(self) -> None: ...
 
 
 class Controller:
@@ -51,22 +52,24 @@ class Controller:
     def begin(self) -> None:
         self.executed = []
         self.results = []
-        self.fb.status("listening")
+        if hasattr(self.executor, "begin_utterance"):
+            self.executor.begin_utterance()
 
-    def partial(self, text: str) -> None:
-        self.fb.transcript(text, final=False)
+    def partial(self, text: str, pause: float = 0.0) -> None:
+        """A growing transcript while the key is held. `pause`: seconds of silence at its end.
+        (The transcript itself is shown by the caller straight away, not from this queue.)"""
         if self.settings is None or self.settings.act_while_speaking:
-            self._advance(text, final=False)
+            self._advance(text, final=False, pause=pause)
 
     def final(self, text: str) -> None:
         text = (text or "").strip()
-        self.fb.transcript(text, final=True)
+        try:
+            if text:
+                self._advance(text, final=True)
+        finally:
+            self.fb.finished()
         if not text:
-            self.fb.status("idle")
             return
-        self._advance(text, final=True)
-        if not self.results:
-            self.fb.status("idle")
         if self.utterance_log:
             try:
                 with open(self.utterance_log, "a", encoding="utf-8") as f:
@@ -76,18 +79,39 @@ class Controller:
                 pass
 
     # ------------------------------------------------------------ core
-    def _advance(self, text: str, final: bool) -> None:
+    def _ready(self, cmd: Command, pause: float) -> bool:
+        """May the last command of a partial transcript run already?"""
+        if cmd.intent == "unknown":
+            return False
+        if safe_on_partial(cmd):
+            return True
+        s = self.settings
+        act, act_free = (s.pause_act_seconds, s.pause_act_free_seconds) if s else (0.7, 1.2)
+        return pause >= (act_free if cmd.free_text else act)
+
+    def _first_new(self, cmds: list[Command]) -> int:
+        """Index of the first command not handled yet in this utterance.
+
+        Commands already run are matched against the new parse in order (allowing for the
+        recognizer adding or revising a few words), so a command never runs twice and a lone
+        word that later merges into small talk does not shift everything after it."""
+        j = 0
+        for sig in self.executed:
+            for k in range(j, min(len(cmds), j + 3)):
+                if cmds[k].signature() == sig:
+                    j = k + 1
+                    break
+        return j
+
+    def _advance(self, text: str, final: bool, pause: float = 0.0) -> None:
         cmds = parse(text)
-        for i in range(len(self.executed), len(cmds)):
+        for i in range(self._first_new(cmds), len(cmds)):
             cmd = cmds[i]
             last = i == len(cmds) - 1
-            if not final and (cmd.intent == "unknown" or (last and not safe_on_partial(cmd))):
+            # while speaking: a command that is followed by another one is complete (even if we
+            # could not read it); the last one runs only when it cannot grow any more
+            if not final and last and not self._ready(cmd, pause):
                 break
-            if self.executed and cmd.signature() == self.executed[-1] and cmd.intent not in (
-                    "scroll", "volume", "brightness", "keys", "media", "next_tab", "prev_tab"):
-                # the recognizer revised earlier words and the same command shifted by one
-                self.executed.append(cmd.signature())
-                continue
             self.executed.append(cmd.signature())
             if cmd.intent == "unknown":
                 cmd = self._fallback(cmd)
@@ -125,8 +149,8 @@ class Controller:
                 self._report(cmd, res)
                 return res
         if cmd.intent in ("confirm", "cancel"):
-            res = Result(False, "Kuch confirm karne ko pending nahi hai")
-            self._report(cmd, res)
+            res = Result(True, "nothing pending")       # an "okay" between commands: ignore quietly
+            self._record(cmd, res)
             return res
         if cmd.intent == "pick" and not self.pending_pick:
             cmd = Command("click", {"ordinal": cmd.args["n"]}, cmd.text)
