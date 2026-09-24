@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Test Shop</title>
+<style>body{font-family:sans-serif;margin:0}header{padding:10px;background:#eee}main{padding:20px}
+.tall{height:3000px;background:linear-gradient(#fff,#ccd)}</style></head>
+<body>
+<header>
+  <nav><a href="#home">Home</a> <a href="#orders">Your orders</a> <a href="#contact">Contact us</a></nav>
+  <input type="search" id="q" name="q" placeholder="Search products" aria-label="Search">
+  <button id="login">Log in</button> <button id="signup">Sign up</button>
+</header>
+<main>
+  <h3><a href="#r1">First result about lofi beats to study</a></h3>
+  <h3><a href="#r2">Second result: best lofi playlists of 2026</a></h3>
+  <h3><a href="#r3">Third result: how lofi music is made</a></h3>
+  <label for="name">Your name</label> <input id="name" type="text">
+  <textarea id="msg" placeholder="Message"></textarea>
+  <button id="cart">Add to cart</button>
+  <button id="order">Place order</button>
+  <button id="more1">More options</button>
+  <button id="more2">More filters</button>
+  <button id="more3">More sizes</button>
+  <div class="tall"></div>
+  <a href="#bottom" id="bottom">Bottom link</a>
+</main>
+<script>
+  window.clicks = [];
+  document.addEventListener("click", (e) => {
+    const t = e.target.closest("a,button");
+    if (t) { window.clicks.push(t.id || t.textContent.trim()); if (t.tagName === "A") e.preventDefault(); }
+  });
+</script>
+</body>
+</html>

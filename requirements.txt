@@ -1,0 +1,13 @@
+# setup.ps1 installs torch first from the PyTorch CPU index (smaller than the default wheel),
+# then everything below. Versions are the ones this was tested with, loosely pinned.
+torch>=2.2
+transformers>=4.48,<6
+laya==0.3.11
+huggingface_hub>=0.24
+numpy>=1.24
+sounddevice>=0.4.6
+pynput>=1.7.7
+rapidfuzz>=3.6
+playwright>=1.45
+pycaw>=20240316; sys_platform == "win32"
+comtypes>=1.4; sys_platform == "win32"
